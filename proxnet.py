@@ -71,11 +71,18 @@ def main():
     # TR: Arka planda sürekli tarama yapacak fonksiyon.
     # Background thread to run continuous scans
     def scan_loop():
+        import datetime
         while True:
             print("[*] Running background scan...")
             devices = scanner.scan_network()
+            scan_time = datetime.datetime.now().strftime("%H:%M:%S")
+            threats = detector.get_threats()
             # Let the dashboard know we have new data
-            socketio.emit('update_network', {'devices': devices}, namespace='/')
+            socketio.emit('update_network', {
+                'devices': devices,
+                'last_scan': scan_time,
+                'threats': threats
+            })
             # Wait for 30 seconds before next scan
             time.sleep(30)
             
