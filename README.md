@@ -44,7 +44,7 @@ python proxnet.py --interface Ethernet
 Then, open your web browser and navigate to `http://localhost:5000`.
 
 ## 📸 Screenshots
-*(Add your screenshots here after running the app!)*
+*(comming soon !)*
 
 ## 🧠 What You'll Learn (Networking Concepts)
 - **ARP (Address Resolution Protocol):** How IP addresses map to physical MAC addresses.
