@@ -1,6 +1,3 @@
-> ⚡ **NEW COMMERCIAL RELEASE:** Check out **[ProxSuite PRO (Apex v2.5 Enterprise)](https://prox0959.github.io/ProxSuite-PRO/)** — Our **25-in-1 Native x64 Windows EDR, Live Memory Forensics (Module Stomping / Ghosting / Syscalls), Anti-Stealer & SIEM Suite** (~95 KB EXE, 100% Defender Clean). **[24h Free Trial / .99 License /  Full C# Source Code (Crypto Only)](https://prox0959.github.io/ProxSuite-PRO/#instant-checkout)**
-
----
 
 # 🌐 ProxNet
 
