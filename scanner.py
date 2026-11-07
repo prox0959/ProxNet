@@ -1,19 +1,23 @@
 import logging
 import socket
 import struct
-from scapy.all import ARP, Ether, srp, IP, TCP, ICMP, sr1, conf
+import subprocess
+import re
 
-# Disable scapy verbose logging
-# TR: Scapy'nin gereksiz ekrana yazı basmasını kapatıyoruz.
-conf.verb = 0
-logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+try:
+    from scapy.all import ARP, Ether, srp, IP, TCP, ICMP, sr1, conf
+    conf.verb = 0
+    logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+    HAS_SCAPY = True
+except Exception:
+    HAS_SCAPY = False
+
 
 class NetworkScanner:
     def __init__(self, interface=None, detector=None):
         self.interface = interface
         self.detector = detector
-        # TR: Yaygın MAC adres üreticileri sözlüğü. (OUI Lookup)
-        # Simple dictionary to guess the vendor from the first 3 bytes of MAC.
+        # Common MAC vendor OUI prefixes
         self.mac_vendors = {
             "00:50:56": "VMware",
             "08:00:27": "VirtualBox",
@@ -32,16 +36,13 @@ class NetworkScanner:
 
     def get_local_subnet(self):
         """
-        Attempts to determine the local subnet string (e.g., 192.168.1.0/24)
-        TR: Yerel ağ bloğunu otomatik bulur.
+        Determines the local IPv4 subnet (e.g., 192.168.1.0/24).
         """
         try:
-            # Create a dummy socket to connect outside, getting the local IP
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
-            # Assume /24 for local home networks
             parts = ip.split('.')
             return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
         except Exception:
@@ -50,79 +51,102 @@ class NetworkScanner:
     def get_vendor(self, mac):
         """
         Extracts vendor info based on MAC address prefix.
-        TR: MAC adresinin başından cihaz üreticisini tahmin eder.
         """
-        mac_prefix = mac.upper()[:8]
-        return self.mac_vendors.get(mac_prefix, "Unknown")
+        mac_norm = mac.upper().replace("-", ":")[:8]
+        return self.mac_vendors.get(mac_norm, "Unknown")
 
     def guess_os(self, ip):
         """
         Guesses the OS based on the Time-To-Live (TTL) value from a ping response.
-        TR: Cihaza ping atıp dönen TTL süresine göre işletim sistemini tahmin eder.
         """
-        try:
-            # Send an ICMP echo request (ping)
-            pkt = IP(dst=ip)/ICMP()
-            resp = sr1(pkt, timeout=1, verbose=0)
-            if resp:
-                ttl = resp.ttl
-                # Linux typically has TTL=64, Windows=128, Cisco=255
-                if ttl <= 64:
-                    return "Linux/Unix/Mac"
-                elif ttl <= 128:
-                    return "Windows"
-                else:
-                    return "Network Device (Cisco/Router)"
-        except Exception:
-            pass
+        if HAS_SCAPY:
+            try:
+                pkt = IP(dst=ip) / ICMP()
+                resp = sr1(pkt, timeout=1, verbose=0)
+                if resp:
+                    ttl = resp.ttl
+                    if ttl <= 64:
+                        return "Linux/Unix/Mac"
+                    elif ttl <= 128:
+                        return "Windows"
+                    else:
+                        return "Network Device (Cisco/Router)"
+            except Exception:
+                pass
         return "Unknown OS"
 
     def scan_ports(self, ip):
         """
-        Scans a list of common ports to see if they are open.
-        TR: Cihazın yaygın kapılarını (port) tarar.
+        Scans a list of common ports using TCP SYN (Scapy) or standard TCP connect fallback.
         """
         open_ports = []
+        if HAS_SCAPY:
+            try:
+                for port in self.common_ports:
+                    pkt = IP(dst=ip) / TCP(dport=port, flags="S")
+                    resp = sr1(pkt, timeout=0.2, verbose=0)
+                    if resp and resp.haslayer(TCP) and resp.getlayer(TCP).flags == 0x12:
+                        open_ports.append(port)
+                        sr1(IP(dst=ip) / TCP(dport=port, flags="AR"), timeout=0.2, verbose=0)
+                return open_ports
+            except Exception:
+                pass
+
+        # Fallback: Native TCP socket connect scan (requires no Npcap driver)
+        for port in self.common_ports:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.15)
+                    if s.connect_ex((ip, port)) == 0:
+                        open_ports.append(port)
+            except Exception:
+                pass
+        return open_ports
+
+    def _scan_arp_table_fallback(self):
+        """
+        Fallback ARP table parser using OS `arp -a` when Npcap/WinPcap is unavailable.
+        """
+        discovered = []
         try:
-            for port in self.common_ports:
-                # Create a TCP SYN packet
-                pkt = IP(dst=ip)/TCP(dport=port, flags="S")
-                resp = sr1(pkt, timeout=0.2, verbose=0)
-                # If we get a response and the flags contain 'SA' (SYN-ACK)
-                if resp and resp.haslayer(TCP) and resp.getlayer(TCP).flags == 0x12:
-                    open_ports.append(port)
-                    # Send RST to close the connection properly
-                    sr1(IP(dst=ip)/TCP(dport=port, flags="AR"), timeout=0.2, verbose=0)
+            out = subprocess.check_output(["arp", "-a"], text=True, stderr=subprocess.DEVNULL, errors="ignore")
+            for line in out.splitlines():
+                m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2})", line)
+                if m:
+                    ip, mac = m.group(1), m.group(2).replace("-", ":").lower()
+                    if ip.endswith(".255") or ip.startswith("224.") or ip.startswith("239.") or mac == "ff:ff:ff:ff:ff:ff":
+                        continue
+                    discovered.append((ip, mac))
         except Exception:
             pass
-        return open_ports
+        return discovered
 
     def scan_network(self, target_ip=None):
         """
-        Performs an ARP scan to discover devices on the network.
-        TR: Ağa 'Kimler burda?' diye sorar (ARP Scan) ve cihazları bulur.
+        Performs an ARP scan to discover devices on the network, with automatic OS ARP fallback.
         """
         if not target_ip:
             target_ip = self.get_local_subnet()
-            
-        print(f"[Scanner] Scanning network: {target_ip}")
-        
-        # Craft an ARP request to the broadcast MAC address
-        # TR: ARP isteği hazırlayıp tüm ağa yollarız.
-        arp = ARP(pdst=target_ip)
-        ether = Ether(dst="ff:ff:ff:ff:ff:ff")
-        packet = ether/arp
 
-        # Send packet and capture responses
-        # TR: Paketi gönder ve cevapları dinle.
-        result = srp(packet, timeout=3, verbose=0, iface=self.interface)[0]
+        print(f"[Scanner] Scanning network: {target_ip}")
+        raw_pairs = []
+
+        if HAS_SCAPY:
+            try:
+                arp = ARP(pdst=target_ip)
+                ether = Ether(dst="ff:ff:ff:ff:ff:ff")
+                packet = ether / arp
+                result = srp(packet, timeout=3, verbose=0, iface=self.interface)[0]
+                for _, received in result:
+                    raw_pairs.append((received.psrc, received.hwsrc))
+            except Exception as e:
+                print(f"[Scanner] Layer-2 raw socket unavailable ({e}), using OS ARP cache fallback...")
+
+        if not raw_pairs:
+            raw_pairs = self._scan_arp_table_fallback()
 
         devices = []
-        for sent, received in result:
-            ip = received.psrc
-            mac = received.hwsrc
-            
-            # Try to resolve hostname
+        for ip, mac in raw_pairs:
             try:
                 hostname = socket.gethostbyaddr(ip)[0]
             except Exception:
@@ -141,8 +165,7 @@ class NetworkScanner:
                 "open_ports": open_ports
             }
             devices.append(device_info)
-            
-            # Pass device to detector for analysis
+
             if self.detector:
                 self.detector.analyze_device(device_info)
 

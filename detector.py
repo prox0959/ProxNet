@@ -10,15 +10,20 @@ class ThreatDetector:
         # Keeps track of all threats detected
         # TR: Tespit edilen tehditleri bir listede tutarız.
         self.threat_log = []
+        self._seen_alerts = set()
         
         # To detect IP conflicts / ARP Spoofing
         self.ip_to_mac = {}
 
     def log_threat(self, device_ip, severity, message):
         """
-        Adds a new threat to the log.
+        Adds a new threat to the log (deduplicating repeated scan alerts).
         TR: Yeni bir tehdidi (uyarıyı) kayıt defterine ekler.
         """
+        sig = (device_ip, severity, message)
+        if sig in self._seen_alerts:
+            return
+        self._seen_alerts.add(sig)
         threat = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "ip": device_ip,
